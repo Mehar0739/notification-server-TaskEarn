@@ -10,8 +10,8 @@ app.use(express.json());
 const port = process.env.PORT || 3000;
 
 // Fix private key formatting from .env
-const privateKey = process.env.FIREBASE_PRIVATE_KEY 
-    ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') 
+const privateKey = process.env.FIREBASE_PRIVATE_KEY
+    ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
     : undefined;
 
 // Initialize Firebase
@@ -36,7 +36,7 @@ const sendNotification = async (title, message) => {
                 app_id: process.env.ONESIGNAL_APP_ID,
                 // Server directly targets your Email
                 filters: [
-                    {"field": "tag", "key": "email", "relation": "=", "value": process.env.ADMIN_EMAIL}
+                    { "field": "tag", "key": "email", "relation": "=", "value": process.env.ADMIN_EMAIL }
                 ],
                 headings: { en: title },
                 contents: { en: message }
@@ -61,7 +61,7 @@ db.collection('transactions').where('status', '==', 'Pending')
             if (change.type === 'added') {
                 const data = change.doc.data();
                 const createdAt = data.createdAt ? data.createdAt.toDate() : new Date();
-                
+
                 if (createdAt >= startupTime) {
                     if (data.type === 'Recharge') {
                         sendNotification('New Deposit Request', `User requested a deposit of ${data.amount} USDT.`);
@@ -80,7 +80,7 @@ db.collection('tickets').where('status', '==', 'Pending')
             if (change.type === 'added') {
                 const data = change.doc.data();
                 const createdAt = data.createdAt ? data.createdAt.toDate() : new Date();
-                
+
                 if (createdAt >= startupTime) {
                     sendNotification('New Support Ticket', `A user just sent a message.`);
                 }
@@ -106,7 +106,7 @@ app.post('/api/payment/oxapay/create-order', async (req, res) => {
     try {
         const secretsRef = db.collection('settings').doc('secrets');
         const secretsSnap = await secretsRef.get();
-        
+
         if (!secretsSnap.exists) {
             return res.status(500).json({ error: 'Payment gateway not configured' });
         }
@@ -119,7 +119,7 @@ app.post('/api/payment/oxapay/create-order', async (req, res) => {
         }
 
         const orderId = `ORDER_${Date.now()}_${userId.slice(0, 5)}`;
-        
+
         const payload = {
             merchant: apiKey,
             amount: parseFloat(amount),
@@ -131,7 +131,7 @@ app.post('/api/payment/oxapay/create-order', async (req, res) => {
             orderId: orderId,
             email: userEmail || '',
             callbackUrl: `${req.protocol}://${req.get('host')}/api/payment/oxapay/webhook`,
-            returnUrl: req.headers.origin || "https://your-site.com",
+            returnUrl: req.headers.origin || "https://taskearn.vip",
         };
 
         const response = await axios.post(OXAPAY_API_URL, payload);
@@ -162,15 +162,37 @@ app.post('/api/payment/oxapay/create-order', async (req, res) => {
     }
 });
 
-// OxaPay Webhook Handler
+// OxaPay Webhook Handler with Security Verification
 app.post('/api/payment/oxapay/webhook', async (req, res) => {
+    const receivedSignature = req.headers['hmac'];
     const { trackId, orderId, status, amount, payAmount } = req.body;
 
     console.log(`OxaPay Webhook received: Order ${orderId}, Status ${status}`);
 
-    if (status === 'Paid' || status === 'Success') {
-        try {
-            // 1. Find the transaction in Firestore
+    try {
+        // 1. Fetch the API Key from secrets
+        const secretsRef = db.collection('settings').doc('secrets');
+        const secretsSnap = await secretsRef.get();
+        if (!secretsSnap.exists) return res.sendStatus(500);
+
+        const apiKey = secretsSnap.data().oxapayApiKey;
+
+        // 2. Verify the HMAC Signature
+        // OxaPay sends HMAC of the raw body using the API Key as secret
+        const payload = JSON.stringify(req.body);
+        const calculatedSignature = crypto
+            .createHmac('sha512', apiKey)
+            .update(payload)
+            .digest('hex');
+
+        if (receivedSignature !== calculatedSignature) {
+            console.warn("Invalid HMAC signature received! Possible attack.");
+            return res.status(401).send('Unauthorized');
+        }
+
+        // 3. Process the payment if verified and status is Paid
+        if (status === 'Paid' || status === 'Success') {
+            // Find the transaction in Firestore
             const txQuery = await db.collection('transactions')
                 .where('orderId', '==', orderId)
                 .where('status', '==', 'Pending')
@@ -182,14 +204,14 @@ app.post('/api/payment/oxapay/webhook', async (req, res) => {
                 const txData = txDoc.data();
                 const userId = txData.userId;
 
-                // 2. Update transaction status
+                // Update transaction status
                 await txDoc.ref.update({
                     status: 'Completed',
                     paidAmount: payAmount,
                     completedAt: admin.firestore.FieldValue.serverTimestamp()
                 });
 
-                // 3. Credit user balance
+                // Credit user balance
                 const userRef = db.collection('users').doc(userId);
                 await userRef.update({
                     rechargeBalance: admin.firestore.FieldValue.increment(parseFloat(amount))
@@ -197,13 +219,15 @@ app.post('/api/payment/oxapay/webhook', async (req, res) => {
 
                 console.log(`Successfully credited ${amount} USDT to User ${userId}`);
             }
-        } catch (error) {
-            console.error("Webhook Processing Error:", error);
         }
-    }
 
-    // Always respond with 200 to OxaPay
-    res.sendStatus(200);
+        // Respond with 'ok' as required by OxaPay
+        res.status(200).send('ok');
+
+    } catch (error) {
+        console.error("Webhook Processing Error:", error);
+        res.status(500).send('Internal Server Error');
+    }
 });
 
 app.listen(port, () => {
