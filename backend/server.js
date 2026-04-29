@@ -60,14 +60,17 @@ db.collection('transactions').where('status', '==', 'Pending')
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
-                const createdAt = data.createdAt ? data.createdAt.toDate() : new Date();
-
-                if (createdAt >= startupTime) {
+                
+                // Only send if we haven't notified already
+                if (!data.notified) {
                     if (data.type === 'Recharge') {
                         sendNotification('New Deposit Request', `User requested a deposit of ${data.amount} USDT.`);
                     } else if (data.type === 'Withdrawal') {
                         sendNotification('New Withdrawal Request', `User requested a withdrawal of ${data.amount} USDT.`);
                     }
+                    
+                    // Mark as notified so we never send it again even if script restarts
+                    change.doc.ref.update({ notified: true }).catch(err => console.error("Failed to mark notified", err));
                 }
             }
         });
@@ -79,10 +82,10 @@ db.collection('tickets').where('status', '==', 'Pending')
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
-                const createdAt = data.createdAt ? data.createdAt.toDate() : new Date();
-
-                if (createdAt >= startupTime) {
+                
+                if (!data.notified) {
                     sendNotification('New Support Ticket', `A user just sent a message.`);
+                    change.doc.ref.update({ notified: true }).catch(err => console.error("Failed to mark notified", err));
                 }
             }
         });
