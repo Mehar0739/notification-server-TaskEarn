@@ -69,10 +69,15 @@ db.collection('transactions').where('status', '==', 'Pending')
                 
                 // Only process if we haven't notified already
                 if (!data.notified) {
+                    // Use a 5-minute grace period to account for Render server wake-up delay
                     const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
-                    console.log(`[TX] New Pending found: ${docId}. Type: ${data.type}. Created: ${createdAt}`);
+                    const now = new Date();
+                    const ageInMinutes = (now - createdAt) / (1000 * 60);
+                    
+                    console.log(`[TX] New Pending found: ${docId}. Created: ${createdAt}. Age: ${ageInMinutes.toFixed(1)} mins`);
 
-                    if (createdAt >= startupTime) {
+                    // If it's fresh (less than 10 mins old) and not notified, send it!
+                    if (ageInMinutes < 10) {
                         console.log(`[TX] Sending push for ${docId}...`);
                         if (data.type === 'Recharge') {
                             sendNotification('New Deposit Request', `User requested a deposit of ${data.amount} USDT.`);
@@ -80,9 +85,10 @@ db.collection('transactions').where('status', '==', 'Pending')
                             sendNotification('New Withdrawal Request', `User requested a withdrawal of ${data.amount} USDT.`);
                         }
                     } else {
-                        console.log(`[TX] Skipping push for old transaction ${docId} (Created before startup).`);
+                        console.log(`[TX] Skipping push for old transaction ${docId} (Age: ${ageInMinutes.toFixed(1)} mins).`);
                     }
                     
+                    // Mark as notified in DB so we never process it again
                     change.doc.ref.update({ notified: true })
                         .then(() => console.log(`[TX] Marked ${docId} as notified.`))
                         .catch(err => console.error(`[TX] Failed to mark ${docId}:`, err));
@@ -101,9 +107,12 @@ db.collection('tickets').where('status', '==', 'Pending')
                 
                 if (!data.notified) {
                     const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
-                    console.log(`[Ticket] New Pending found: ${docId}. Created: ${createdAt}`);
+                    const now = new Date();
+                    const ageInMinutes = (now - createdAt) / (1000 * 60);
 
-                    if (createdAt >= startupTime) {
+                    console.log(`[Ticket] New Pending found: ${docId}. Age: ${ageInMinutes.toFixed(1)} mins`);
+
+                    if (ageInMinutes < 10) {
                         console.log(`[Ticket] Sending push for ${docId}...`);
                         sendNotification('New Support Ticket', `A user just sent a message.`);
                     } else {
