@@ -48,9 +48,9 @@ const sendNotification = async (title, message) => {
                 }
             }
         );
-        console.log("Notification sent successfully!");
+        console.log("OneSignal Notification Sent! Response:", response.data);
     } catch (error) {
-        console.error("Error sending notification:", error.response ? error.response.data : error.message);
+        console.error("OneSignal Error:", error.response ? JSON.stringify(error.response.data) : error.message);
     }
 };
 
@@ -60,17 +60,29 @@ db.collection('transactions').where('status', '==', 'Pending')
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
+                const docId = change.doc.id;
                 
-                // Only send if we haven't notified already
+                // Only process if we haven't notified already
                 if (!data.notified) {
-                    if (data.type === 'Recharge') {
-                        sendNotification('New Deposit Request', `User requested a deposit of ${data.amount} USDT.`);
-                    } else if (data.type === 'Withdrawal') {
-                        sendNotification('New Withdrawal Request', `User requested a withdrawal of ${data.amount} USDT.`);
+                    const createdAt = data.createdAt ? data.createdAt.toDate() : new Date();
+                    console.log(`Processing new transaction ${docId}. Created at: ${createdAt}`);
+
+                    // Only SEND push notification if it's a "fresh" document (created after script started)
+                    // This prevents flooding old pending requests on every server restart
+                    if (createdAt >= startupTime) {
+                        if (data.type === 'Recharge') {
+                            sendNotification('New Deposit Request', `User requested a deposit of ${data.amount} USDT.`);
+                        } else if (data.type === 'Withdrawal') {
+                            sendNotification('New Withdrawal Request', `User requested a withdrawal of ${data.amount} USDT.`);
+                        }
+                    } else {
+                        console.log(`Skipping push for old transaction ${docId} (Initial snapshot).`);
                     }
                     
-                    // Mark as notified so we never send it again even if script restarts
-                    change.doc.ref.update({ notified: true }).catch(err => console.error("Failed to mark notified", err));
+                    // Mark as notified in DB so we don't process it again
+                    change.doc.ref.update({ notified: true })
+                        .then(() => console.log(`Marked transaction ${docId} as notified.`))
+                        .catch(err => console.error(`Failed to mark transaction ${docId} as notified:`, err));
                 }
             }
         });
@@ -82,10 +94,21 @@ db.collection('tickets').where('status', '==', 'Pending')
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
+                const docId = change.doc.id;
                 
                 if (!data.notified) {
-                    sendNotification('New Support Ticket', `A user just sent a message.`);
-                    change.doc.ref.update({ notified: true }).catch(err => console.error("Failed to mark notified", err));
+                    const createdAt = data.createdAt ? data.createdAt.toDate() : new Date();
+                    console.log(`Processing new ticket ${docId}. Created at: ${createdAt}`);
+
+                    if (createdAt >= startupTime) {
+                        sendNotification('New Support Ticket', `A user just sent a message.`);
+                    } else {
+                        console.log(`Skipping push for old ticket ${docId}.`);
+                    }
+
+                    change.doc.ref.update({ notified: true })
+                        .then(() => console.log(`Marked ticket ${docId} as notified.`))
+                        .catch(err => console.error(`Failed to mark ticket ${docId} as notified:`, err));
                 }
             }
         });
