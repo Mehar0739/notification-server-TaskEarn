@@ -27,6 +27,10 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 const startupTime = new Date();
+const instanceId = Math.random().toString(36).substring(7).toUpperCase();
+
+console.log(`[Instance:${instanceId}] Notification Server starting up... Startup Time: ${startupTime}`);
+console.log(`[Instance:${instanceId}] Target Admin Email: ${process.env.ADMIN_EMAIL}`);
 
 const sendNotification = async (title, message) => {
     try {
@@ -48,86 +52,73 @@ const sendNotification = async (title, message) => {
                 }
             }
         );
-        console.log("OneSignal Notification Sent! Response:", response.data);
+        console.log(`[Instance:${instanceId}] OneSignal Sent! ID: ${response.data.id}, Recipients: ${response.data.recipients}`);
     } catch (error) {
-        console.error("OneSignal Error:", error.response ? JSON.stringify(error.response.data) : error.message);
+        console.error(`[Instance:${instanceId}] OneSignal Error:`, error.response ? JSON.stringify(error.response.data) : error.message);
     }
 };
 
-console.log(`Notification Server starting up... Startup Time: ${startupTime}`);
-console.log(`Target Admin Email: ${process.env.ADMIN_EMAIL}`);
+const processedIds = new Set();
 
 // Listen to Transactions (Deposits / Withdrawals)
-// Listen to Transactions (Deposits / Withdrawals)
-console.log("Initializing Firestore listeners...");
+console.log(`[Instance:${instanceId}] Initializing Firestore listeners...`);
 db.collection('transactions').where('status', '==', 'Pending')
     .onSnapshot((snapshot) => {
-        console.log(`[Snapshot] Received. Pending Docs: ${snapshot.size}`);
+        console.log(`[Instance:${instanceId}] [Snapshot] Received. Pending Docs: ${snapshot.size}`);
         snapshot.docChanges().forEach((change) => {
             const data = change.doc.data();
             const docId = change.doc.id;
-            console.log(`[Snapshot Change] Type: ${change.type}, Doc: ${docId}, Notified: ${data.notified}`);
+            
+            // Log for debugging
+            console.log(`[Instance:${instanceId}] [Snapshot Change] Type: ${change.type}, Doc: ${docId}, Notified: ${data.notified}`);
 
-            // Process both 'added' and 'modified' to capture status changes
-            if (change.type === 'added' || change.type === 'modified') {
-                if (!data.notified) {
-                    const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
-                    const now = new Date();
-                    const ageInMinutes = (now - createdAt) / (1000 * 60);
-                    
-                    console.log(`[TX] Processing ${docId}. Age: ${ageInMinutes.toFixed(1)} mins`);
-
-                    // Increased grace period to 60 minutes
-                    if (ageInMinutes < 60) {
-                        console.log(`[TX] Sending push for ${docId}...`);
-                        if (data.type === 'Recharge') {
-                            sendNotification('New Deposit Request', `User requested a deposit of ${data.amount} USDT.`);
-                        } else if (data.type === 'Withdrawal') {
-                            sendNotification('New Withdrawal Request', `User requested a withdrawal of ${data.amount} USDT.`);
-                        }
-                    } else {
-                        console.log(`[TX] Skipping push for ${docId} (Old: ${ageInMinutes.toFixed(1)} mins).`);
-                    }
-                    
-                    // Mark as notified in DB
-                    change.doc.ref.update({ notified: true })
-                        .then(() => console.log(`[TX] Successfully marked ${docId} as notified.`))
-                        .catch(err => console.error(`[TX] Failed to mark ${docId}:`, err));
+            // Process if it's a new or modified pending transaction that we haven't handled yet
+            if (!data.notified && !processedIds.has(docId)) {
+                // Add to memory set immediately to prevent duplicate triggers from 'modified' snapshots
+                processedIds.add(docId);
+                
+                console.log(`[Instance:${instanceId}] [TX] Processing Instant Notification for ${docId}...`);
+                
+                if (data.type === 'Recharge') {
+                    sendNotification('New Deposit Request', `User requested a deposit of ${data.amount} USDT.`);
+                } else if (data.type === 'Withdrawal') {
+                    sendNotification('New Withdrawal Request', `User requested a withdrawal of ${data.amount} USDT.`);
                 }
+                
+                // Mark as notified in DB so it doesn't trigger on server restart
+                change.doc.ref.update({ notified: true })
+                    .then(() => console.log(`[Instance:${instanceId}] [TX] Successfully marked ${docId} as notified in DB.`))
+                    .catch(err => {
+                        console.error(`[Instance:${instanceId}] [TX] Failed to mark ${docId}:`, err);
+                        // If update fails, remove from memory set so it can retry on next snapshot
+                        processedIds.delete(docId);
+                    });
             }
         });
-    }, (err) => console.error("Firestore Listener Error (Transactions):", err));
+    }, (err) => console.error(`[Instance:${instanceId}] Firestore Listener Error (Transactions):`, err));
 
 // Listen to Support Tickets
 db.collection('tickets').where('status', '==', 'Pending')
     .onSnapshot((snapshot) => {
-        console.log(`[Snapshot] Tickets Received. Size: ${snapshot.size}`);
         snapshot.docChanges().forEach((change) => {
-            if (change.type === 'added' || change.type === 'modified') {
-                const data = change.doc.data();
-                const docId = change.doc.id;
+            const data = change.doc.data();
+            const docId = change.doc.id;
+            
+            if (!data.notified && !processedIds.has(docId)) {
+                processedIds.add(docId);
                 
-                if (!data.notified) {
-                    const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
-                    const now = new Date();
-                    const ageInMinutes = (now - createdAt) / (1000 * 60);
+                console.log(`[Instance:${instanceId}] [Ticket] Sending Instant Notification for ${docId}...`);
+                sendNotification('New Support Ticket', `A user just sent a message.`);
 
-                    console.log(`[Ticket] Processing ${docId}. Age: ${ageInMinutes.toFixed(1)} mins`);
-
-                    if (ageInMinutes < 60) {
-                        console.log(`[Ticket] Sending push for ${docId}...`);
-                        sendNotification('New Support Ticket', `A user just sent a message.`);
-                    } else {
-                        console.log(`[Ticket] Skipping push for ${docId} (Old).`);
-                    }
-
-                    change.doc.ref.update({ notified: true })
-                        .then(() => console.log(`[Ticket] Successfully marked ${docId} as notified.`))
-                        .catch(err => console.error(`[Ticket] Failed to mark ${docId}:`, err));
-                }
+                change.doc.ref.update({ notified: true })
+                    .then(() => console.log(`[Instance:${instanceId}] [Ticket] Successfully marked ${docId} as notified.`))
+                    .catch(err => {
+                        console.error(`[Instance:${instanceId}] [Ticket] Failed to mark ${docId}:`, err);
+                        processedIds.delete(docId);
+                    });
             }
         });
-    }, (err) => console.error("Firestore Listener Error (Tickets):", err));
+    }, (err) => console.error(`[Instance:${instanceId}] Firestore Listener Error (Tickets):`, err));
 
 // Keep-alive and Test route
 app.get('/', (req, res) => {
