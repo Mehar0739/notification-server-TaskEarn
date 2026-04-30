@@ -54,9 +54,14 @@ const sendNotification = async (title, message) => {
     }
 };
 
+console.log(`Notification Server starting up... Startup Time: ${startupTime}`);
+console.log(`Target Admin Email: ${process.env.ADMIN_EMAIL}`);
+
 // Listen to Transactions (Deposits / Withdrawals)
+console.log("Initializing Firestore listeners...");
 db.collection('transactions').where('status', '==', 'Pending')
     .onSnapshot((snapshot) => {
+        console.log(`Snapshot received: ${snapshot.size} pending transactions found.`);
         snapshot.docChanges().forEach((change) => {
             if (change.type === 'added') {
                 const data = change.doc.data();
@@ -64,29 +69,27 @@ db.collection('transactions').where('status', '==', 'Pending')
                 
                 // Only process if we haven't notified already
                 if (!data.notified) {
-                    const createdAt = data.createdAt ? data.createdAt.toDate() : new Date();
-                    console.log(`Processing new transaction ${docId}. Created at: ${createdAt}`);
+                    const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
+                    console.log(`[TX] New Pending found: ${docId}. Type: ${data.type}. Created: ${createdAt}`);
 
-                    // Only SEND push notification if it's a "fresh" document (created after script started)
-                    // This prevents flooding old pending requests on every server restart
                     if (createdAt >= startupTime) {
+                        console.log(`[TX] Sending push for ${docId}...`);
                         if (data.type === 'Recharge') {
                             sendNotification('New Deposit Request', `User requested a deposit of ${data.amount} USDT.`);
                         } else if (data.type === 'Withdrawal') {
                             sendNotification('New Withdrawal Request', `User requested a withdrawal of ${data.amount} USDT.`);
                         }
                     } else {
-                        console.log(`Skipping push for old transaction ${docId} (Initial snapshot).`);
+                        console.log(`[TX] Skipping push for old transaction ${docId} (Created before startup).`);
                     }
                     
-                    // Mark as notified in DB so we don't process it again
                     change.doc.ref.update({ notified: true })
-                        .then(() => console.log(`Marked transaction ${docId} as notified.`))
-                        .catch(err => console.error(`Failed to mark transaction ${docId} as notified:`, err));
+                        .then(() => console.log(`[TX] Marked ${docId} as notified.`))
+                        .catch(err => console.error(`[TX] Failed to mark ${docId}:`, err));
                 }
             }
         });
-    });
+    }, (err) => console.error("Firestore Listener Error (Transactions):", err));
 
 // Listen to Support Tickets
 db.collection('tickets').where('status', '==', 'Pending')
@@ -97,26 +100,45 @@ db.collection('tickets').where('status', '==', 'Pending')
                 const docId = change.doc.id;
                 
                 if (!data.notified) {
-                    const createdAt = data.createdAt ? data.createdAt.toDate() : new Date();
-                    console.log(`Processing new ticket ${docId}. Created at: ${createdAt}`);
+                    const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : new Date();
+                    console.log(`[Ticket] New Pending found: ${docId}. Created: ${createdAt}`);
 
                     if (createdAt >= startupTime) {
+                        console.log(`[Ticket] Sending push for ${docId}...`);
                         sendNotification('New Support Ticket', `A user just sent a message.`);
                     } else {
-                        console.log(`Skipping push for old ticket ${docId}.`);
+                        console.log(`[Ticket] Skipping push for old ticket ${docId}.`);
                     }
 
                     change.doc.ref.update({ notified: true })
-                        .then(() => console.log(`Marked ticket ${docId} as notified.`))
-                        .catch(err => console.error(`Failed to mark ticket ${docId} as notified:`, err));
+                        .then(() => console.log(`[Ticket] Marked ${docId} as notified.`))
+                        .catch(err => console.error(`[Ticket] Failed to mark ${docId}:`, err));
                 }
             }
         });
-    });
+    }, (err) => console.error("Firestore Listener Error (Tickets):", err));
 
-// Keep-alive route
+// Keep-alive and Test route
 app.get('/', (req, res) => {
-    res.send('Notification Server is Active! 🟢');
+    res.send(`
+        <h1>Notification Server is Active! 🟢</h1>
+        <p>Startup Time: ${startupTime}</p>
+        <p>Admin Email: ${process.env.ADMIN_EMAIL}</p>
+        <hr>
+        <a href="/test-notification" style="padding: 10px 20px; background: gold; border-radius: 5px; text-decoration: none; color: black; font-weight: bold;">
+            Send Test Notification
+        </a>
+    `);
+});
+
+app.get('/test-notification', async (req, res) => {
+    console.log("Manual test notification triggered via browser...");
+    try {
+        await sendNotification('System Test', 'OneSignal connection is working! If you see this, the server is configured correctly.');
+        res.send("<h1>Test Notification Triggered!</h1><p>Check your phone/browser and Render logs.</p><a href='/'>Go Back</a>");
+    } catch (e) {
+        res.status(500).send(`Error: ${e.message}`);
+    }
 });
 
 const OXAPAY_API_URL = 'https://api.oxapay.com/merchants/request';
